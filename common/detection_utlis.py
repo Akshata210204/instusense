@@ -45,21 +45,32 @@ def detect_severity(attack):
 # =================================================
 # MAIN DETECTION FUNCTION
 # =================================================
-def run_detection(uploaded_file):
+def run_detection(file_input):
     """
     Runs intrusion detection on uploaded CSV file.
+    file_input can be:
+    - Streamlit UploadedFile
+    - OR raw bytes
     Returns dataframe with predictions and confidence.
     """
 
-    # -------- Save uploaded file temporarily --------
+    # ---------------------------------
+    # Handle UploadedFile OR bytes
+    # ---------------------------------
+    if isinstance(file_input, bytes):
+        file_bytes = file_input
+    else:
+        file_bytes = file_input.getvalue()
+
+    # -------- Save file temporarily --------
     with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
-        tmp.write(uploaded_file.getvalue())
+        tmp.write(file_bytes)
         temp_path = tmp.name
 
     # -------- Read raw data --------
     df = pd.read_csv(temp_path)
 
-    # -------- Preprocess (same as training) --------
+    # -------- Preprocess --------
     X, _, _, _, _ = load_and_preprocess(
         filepath=temp_path,
         training=False,
@@ -76,11 +87,11 @@ def run_detection(uploaded_file):
         X = np.expand_dims(X, axis=1)
 
     # -------- Prediction --------
-    preds = model.predict(X)
+    preds = model.predict(X, verbose=0)
     pred_classes = np.argmax(preds, axis=1)
     pred_labels = label_encoder.inverse_transform(pred_classes)
 
-    # -------- Confidence (max probability) --------
+    # -------- Confidence --------
     confidence = np.max(preds, axis=1)
 
     # -------- Add results --------
@@ -92,20 +103,36 @@ def run_detection(uploaded_file):
 
 import time
 
-def stream_detection(uploaded_file, delay=1):
+def stream_detection(file_input, delay=1, start_index=0):
     """
-    Simulates real-time intrusion detection
-    Yields one prediction at a time
+    file_input can be:
+    - Streamlit UploadedFile
+    - OR raw bytes (from session_state)
     """
 
-    # Save uploaded file temporarily
+    import tempfile
+    import pandas as pd
+    import numpy as np
+    import time
+    import os
+
+    # ---------------------------------
+    # Handle UploadedFile OR bytes
+    # ---------------------------------
+    if isinstance(file_input, bytes):
+        file_bytes = file_input
+    else:
+        file_bytes = file_input.getvalue()
+
+    # Save once to temp file
     with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
-        tmp.write(uploaded_file.getvalue())
+        tmp.write(file_bytes)
         temp_path = tmp.name
 
+    # Read CSV
     df = pd.read_csv(temp_path)
 
-    # Preprocess full dataset once
+    # Preprocess once
     X, _, _, _, _ = load_and_preprocess(
         filepath=temp_path,
         training=False,
@@ -120,10 +147,11 @@ def stream_detection(uploaded_file, delay=1):
     if X.ndim == 2:
         X = np.expand_dims(X, axis=1)
 
-    # Predict row-by-row
-    for i in range(len(X)):
+    # ---------------------------------
+    # Stream row by row
+    # ---------------------------------
+    for i in range(start_index, len(X)):
         row_X = X[i:i+1]
-        raw_row = df.iloc[i].copy()
 
         preds = model.predict(row_X, verbose=0)
         pred_class = np.argmax(preds, axis=1)
@@ -134,8 +162,7 @@ def stream_detection(uploaded_file, delay=1):
             "row": i + 1,
             "prediction": pred_label,
             "confidence": round(confidence, 3),
-            "severity": detect_severity(pred_label),
-            "data": raw_row
+            "severity": detect_severity(pred_label)
         }
 
         time.sleep(delay)
