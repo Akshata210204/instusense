@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 import time
+import altair as alt
+from streamlit_autorefresh import st_autorefresh
 
 from common.session import require_login
 from common.detection_utils import run_detection, detect_severity, stream_detection
@@ -11,189 +13,376 @@ require_login()
 # ---------------- PAGE CONFIG ----------------
 st.set_page_config(page_title="Intrusion Detection", layout="wide")
 
-# ---------------- CSS ----------------
+# ---------------- GLOBAL CSS ----------------
 st.markdown("""
 <style>
-.card {
-    background: linear-gradient(135deg, #1f2937, #111827);
-    padding: 18px;
-    border-radius: 16px;
+
+/* ---------- HEADER ---------- */
+.header {
+    position: fixed;
+    top: 3.5rem;
+    left: 0;
+    right: 0;
+    height: 80px;
+    background: linear-gradient(90deg, #020617, #0f172a);
     color: white;
-    text-align: center;
-    box-shadow: 0 0 15px rgba(0,255,255,0.12);
+    display: flex;
+    align-items: center;
+    justify-content: center;   /* 👈 CENTER CONTENT */
+    text-align: center;        /* 👈 CENTER TEXT */
+    z-index: 1000;
+    box-shadow: 0 4px 18px rgba(0,0,0,0.3);
 }
-.sub { color: #9ca3af; }
+
+
+.header-title {
+    font-size: 20px;
+    font-weight: 700;
+}
+
+.header-subtitle {
+    font-size: 13px;
+    color: #cbd5f5;
+    margin-top: 2px;
+}
+
+/* ---------- PAGE SPACING ---------- */
+.block-container {
+    padding-top: 150px;
+    padding-bottom: 90px;
+}
+
+/* ---------- FOOTER ---------- */
+.footer {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 60px;
+    background: #020617;
+    color: #94a3b8;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    z-index: 1000;
+}
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------- TITLE ----------------
-st.title("Intrusion Detection System")
-st.caption("Live and offline intrusion detection dashboard")
+# ---------------- CSS ----------------
+st.markdown("""
+<style>
+[data-testid="stAppViewContainer"]{
+    background:#ffffff;
+}
+.card{
+    background:#ffffff;
+    padding:18px;
+    border-radius:16px;
+    text-align:center;
+    border:1px solid #d1fae5;
+    box-shadow:0 8px 20px rgba(0,0,0,0.06);
+}
+</style>
+""", unsafe_allow_html=True)
+
 
 # ---------------- SESSION STATE INIT ----------------
 if "live_running" not in st.session_state:
-    st.session_state["live_running"] = False
+    st.session_state.live_running = False
+if "live_index" not in st.session_state:
+    st.session_state.live_index = 0
+if "live_generator" not in st.session_state:
+    st.session_state.live_generator = None
+if "chart_data" not in st.session_state:
+    st.session_state.chart_data = pd.DataFrame(
+        columns=["packet", "severity", "attack", "confidence"]
+    )
+if st.session_state.get("_last_page") != "detection":
+    st.session_state.live_running = False
+    st.session_state.live_generator = None
 
-if "live_log" not in st.session_state:
-    st.session_state["live_log"] = []
+if "stream_busy" not in st.session_state:
+    st.session_state.stream_busy = False
+
+st.session_state["_last_page"] = "detection"
+
+# ================= HEADER =================
+st.markdown("""
+<div class="header">
+    <div>
+        <div class="header-title">Intrusion Detection System</div>
+        <div class="header-subtitle">Live and Offline Network Threat Monitoring</div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+# ================= UPLOAD =================
+uploaded_file = st.file_uploader("Upload CSV file", type=["csv"])
+
+if uploaded_file and "uploaded_bytes" not in st.session_state:
+    st.session_state.uploaded_bytes = uploaded_file.getvalue()
+
+if uploaded_file and st.button("Start Detection"):
+    st.session_state.last_detection = run_detection(
+        st.session_state.uploaded_bytes
+    )
+    st.session_state.chart_data = st.session_state.chart_data.iloc[0:0]
+    st.session_state.live_index = 0
+    st.session_state.live_generator = None
+    st.session_state.live_running = False
+    st.success(" ")
 
 # =====================================================
-# UPLOAD DATASET
-# =====================================================
-st.subheader("Upload Network Dataset")
-
-uploaded_file = st.file_uploader(
-    "Upload CSV file (network traffic)",
-    type=["csv"]
-)
-
-if uploaded_file:
-    st.success("Dataset uploaded successfully")
-
-    if st.button("Run Detection"):
-        with st.spinner("Running intrusion detection..."):
-            result_df = run_detection(uploaded_file)
-
-        st.session_state["last_detection"] = result_df
-        st.success("Detection completed successfully")
-
-# =====================================================
-# RESULTS SECTION
+# MAIN CONTENT
 # =====================================================
 if "last_detection" in st.session_state:
-
-    df = st.session_state["last_detection"]
-
-    # ---------------- KPI CARDS ----------------
-    total_records = len(df)
-    total_attacks = len(df[df["Predicted_Attack"] != "Normal"])
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.markdown(f"<div class='card'><h3>{total_records}</h3><div class='sub'>Total Records</div></div>", unsafe_allow_html=True)
-    with col2:
-        st.markdown(f"<div class='card'><h3>{total_attacks}</h3><div class='sub'>Detected Attacks</div></div>", unsafe_allow_html=True)
-    with col3:
-        st.markdown(f"<div class='card'><h3>{round((total_attacks/total_records)*100,2)}%</h3><div class='sub'>Attack Ratio</div></div>", unsafe_allow_html=True)
+    df = st.session_state.last_detection
 
     st.divider()
 
-    # =====================================================
-    # TABS
-    # =====================================================
-    tab_live, tab_row, tab_search, tab_severity, tab_results = st.tabs([
-        "Live Stream",
-        "Predict by Row",
-        "Search Attack",
-        "Severity View",
-        "Full Results"
-    ])
-
-    # =====================================================
+        # =====================================================
     # LIVE STREAM
     # =====================================================
-    with tab_live:
-        st.subheader("Live Intrusion Detection")
+    st.subheader("Live Intrusion Detection")
+    chart_placeholder = st.container()
 
-        colA, colB = st.columns(2)
+    colA, colB = st.columns(2)
 
-        with colA:
-            if st.button("Start"):
-                st.session_state["live_running"] = True
+    with colA:
+        if st.button("Start Live Stream"):
+            st.session_state.live_running = True
+            st.session_state.live_generator = stream_detection(
+                st.session_state.uploaded_bytes,
+                start_index=st.session_state.live_index,
+                delay=0
+            )
 
-        with colB:
-            if st.button("Stop"):
-                st.session_state["live_running"] = False
+    with colB:
+        if st.button("Stop Live Stream"):
+            st.session_state.live_running = False
+            st.session_state.live_generator = None
 
-        placeholder = st.empty()
+    # Auto refresh every 1 second while live is running
+    if st.session_state.live_running:
+        st_autorefresh(interval=2000, key="live_refresh")
 
-        def color_row(row):
-            if row["Severity"] == "Low":
-                return ["background-color: #558c1b; color: white"] * len(row)
-            elif row["Severity"] == "Medium":
-                return ["background-color: #f59764; color: black"] * len(row)
-            else:
-                return ["background-color: #d63c3c; color: white"] * len(row)
 
-        if uploaded_file and st.session_state["live_running"]:
-            for event in stream_detection(uploaded_file, delay=2):
+    def render_chart():
+        if st.session_state.chart_data.empty:
+            return
 
-                if not st.session_state["live_running"]:
-                    st.warning("Live stream stopped")
-                    break
-
-                st.session_state["live_log"].append({
-                    "Row": event["row"],
-                    "Predicted_Attack": event["prediction"],
-                    "Confidence": event["confidence"],
-                    "Severity": event["severity"]
-                })
-
-                live_df = pd.DataFrame(st.session_state["live_log"])
-                placeholder.dataframe(live_df.style.apply(color_row, axis=1), use_container_width=True)
-
-        elif st.session_state["live_log"]:
-            live_df = pd.DataFrame(st.session_state["live_log"])
-            placeholder.dataframe(live_df.style.apply(color_row, axis=1), use_container_width=True)
-
-    # =====================================================
-    # PREDICT BY ROW
-    # =====================================================
-    with tab_row:
-        st.subheader("Predict by Row Number")
-
-        row_num = st.number_input(
-            "Enter row number",
-            min_value=1,
-            max_value=len(df),
-            value=1,
-            step=1
+        base = alt.Chart(st.session_state.chart_data)
+        line = base.mark_line(strokeWidth=3, color="#39ff14").encode(
+            x=alt.X("packet:Q",  title="Packet Number", scale=alt.Scale(nice=False)),
+            y=alt.Y(
+                "severity:Q",
+                scale=alt.Scale(domain=[0.5, 3.5]),
+                axis=alt.Axis(
+                    values=[1, 2, 3],
+                    labelExpr="datum.value == 1 ? 'Low' : datum.value == 2 ? 'Medium' : 'High'"
+                )
+            )
         )
 
-        row = df.iloc[row_num]
+        points = base.mark_circle(size=90).encode(
+            x="packet:Q",
+            y="severity:Q",
+            color="attack:N",
+            tooltip=["packet", "attack", "confidence"]
+        )
 
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.markdown(f"<div class='card'><h4>Predicted Attack</h4><h2>{row['Predicted_Attack']}</h2></div>", unsafe_allow_html=True)
-        with col2:
-            st.markdown(f"<div class='card'><h4>Severity</h4><h2>{detect_severity(row['Predicted_Attack'])}</h2></div>", unsafe_allow_html=True)
-        with col3:
-            st.markdown(f"<div class='card'><h4>Confidence</h4><h2>{round(row['Confidence']*100,2)}%</h2></div>", unsafe_allow_html=True)
+        chart_placeholder.altair_chart(
+            (line + points).properties(height=380),
+            use_container_width=True
+        )
+
+
+    # Stream one event per refresh
+    if (
+        st.session_state.live_running
+        and st.session_state.live_generator
+        and not st.session_state.stream_busy
+    ):
+        try:
+            st.session_state.stream_busy = True
+
+            event = next(st.session_state.live_generator)
+
+            sev = 1 if event["severity"] == "Low" else 2 if event["severity"] == "Medium" else 3
+
+            st.session_state.chart_data.loc[len(st.session_state.chart_data)] = {
+                "packet": event["row"],
+                "severity": sev,
+                "attack": event["prediction"],
+                "confidence": event["confidence"]
+            }
+
+            st.session_state.live_index = event["row"]
+
+        except StopIteration:
+            st.session_state.live_running = False
+            st.session_state.live_generator = None
+
+        finally:
+            st.session_state.stream_busy = False
+
+    # Always render chart
+    render_chart()
 
     # =====================================================
-    # SEARCH ATTACK
+    # LIVE DATA LIMIT
     # =====================================================
-    with tab_search:
-        st.subheader("Search by Attack Name")
+    if st.session_state.live_index > 0:
+        live_df = df.iloc[:st.session_state.live_index]
+    else:
+        live_df = pd.DataFrame()
 
-        query = st.text_input("Enter attack name").lower()
 
-        if query:
-            filtered = df[df["Predicted_Attack"].str.lower().str.contains(query)]
+    # =====================================================
+    # TABS (BELOW LIVE STREAM)
+    # =====================================================
 
-            if filtered.empty:
-                st.warning("No matching attacks found")
+    # =====================================================
+# SHOW OPTIONS ONLY WHEN LIVE STREAM IS STOPPED
+# =====================================================
+    if not st.session_state.live_running and not live_df.empty:
+
+        st.divider()
+        tab_row, tab_search, tab_severity, tab_results = st.tabs([
+            "Predict by Packet Number",
+            "Search Attack",
+            "Severity View",
+            "Full Results"
+        ])
+
+        # ---------------- PREDICT BY ROW ----------------
+        with tab_row:
+            st.subheader("Predict by Packet Number")
+
+            if live_df.empty:
+                st.info("Start live stream to see predictions")
             else:
-                filtered = filtered.copy()
-                filtered["Row"] = filtered.index + 1
-                st.dataframe(filtered[["Row", "Predicted_Attack", "Confidence"]], use_container_width=True)
+                row_no = st.number_input(
+                    "Select Packet Number",
+                    min_value=1,
+                    max_value=len(live_df),
+                    value=1,
+                    step=1
+                )
 
-    # =====================================================
-    # SEVERITY VIEW
-    # =====================================================
-    with tab_severity:
-        st.subheader("Attack Severity Overview")
+                # Convert user-friendly (1-based) to pandas (0-based)
+                row = live_df.iloc[row_no - 1]
 
-        df["Severity"] = df["Predicted_Attack"].apply(detect_severity)
-        st.bar_chart(df["Severity"].value_counts())
-        st.dataframe(df[["Predicted_Attack", "Severity", "Confidence"]], use_container_width=True)
+                sev = detect_severity(row["Predicted_Attack"])
 
-    # =====================================================
-    # FULL RESULTS
-    # =====================================================
-    with tab_results:
-        st.subheader("Detection Results (Offline)")
-        st.dataframe(df, use_container_width=True)
+                col1, col2, col3 = st.columns(3)
+
+                with col1:
+                    st.markdown(f"""
+                    <div class="card">
+                        <h4>Predicted Attack</h4>
+                        <h2>{row['Predicted_Attack']}</h2>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                with col2:
+                    st.markdown(f"""
+                    <div class="card">
+                        <h4>Severity</h4>
+                        <h2>{sev}</h2>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                with col3:
+                    st.markdown(f"""
+                    <div class="card">
+                        <h4>Confidence</h4>
+                        <h2>{round(row['Confidence'] * 100, 2)}%</h2>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+
+
+        # ---------------- SEARCH ATTACK ----------------
+        with tab_search:
+            st.subheader("Search Attack (Live Data Only)")
+
+            if live_df.empty:
+                st.info("No live data yet")
+            else:
+                query = st.text_input("Enter attack name").lower()
+
+                if query:
+                    result = live_df[
+                        live_df["Predicted_Attack"].str.lower().str.contains(query)
+                    ].copy()
+
+                    if result.empty:
+                        st.warning("No matching attacks found")
+                    else:
+                        result["Row"] = result.index + 1
+                        result["Severity"] = result["Predicted_Attack"].apply(detect_severity)
+                        result["Confidence (%)"] = (result["Confidence"] * 100).round(2)
+
+                        st.dataframe(
+                            result[["Row", "Predicted_Attack", "Severity", "Confidence (%)"]],
+                            use_container_width=True
+                        )
+
+        # ---------------- SEVERITY VIEW ----------------
+        with tab_severity:
+            st.subheader("Severity Distribution (Live Data)")
+
+            if live_df.empty:
+                st.info("No live data yet")
+            else:
+                temp_df = live_df.copy()
+                temp_df["Severity"] = temp_df["Predicted_Attack"].apply(detect_severity)
+
+                severity_counts = temp_df["Severity"].value_counts().reset_index()
+                severity_counts.columns = ["Severity", "Count"]
+
+                pie = alt.Chart(severity_counts).mark_arc(innerRadius=60).encode(
+                    theta="Count:Q",
+                    color="Severity:N",
+                    tooltip=["Severity", "Count"]
+                ).properties(height=350)
+
+                st.altair_chart(pie, use_container_width=True)
+
+
+        # ---------------- FULL RESULTS ----------------
+        with tab_results:
+            st.subheader("Full Results (Live Data Only)")
+
+            if live_df.empty:
+                st.info("No live data yet")
+            else:
+                df_show = live_df.reset_index(drop=True)
+                df_show.index = df_show.index + 1
+
+                st.dataframe(df_show, use_container_width=True)
+
+                csv = df_show.to_csv(index=True).encode("utf-8")
+
+                st.download_button(
+                    label="Download Results as CSV",
+                    data=csv,
+                    file_name="ids_live_results.csv",
+                    mime="text/csv"
+                )
+
+
 
 else:
-    st.info("Upload a dataset and run detection to see results.")
+    st.info("Upload dataset and run detection")
+
+
+# ================= FOOTER =================
+st.markdown("""
+<div class="footer">
+Intrusion Detection System · Live Detection Console · 2026
+</div>
+""", unsafe_allow_html=True)
